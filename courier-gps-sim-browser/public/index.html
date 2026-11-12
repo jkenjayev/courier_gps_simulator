@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Courier GPS Simulator</title>
+<link rel="stylesheet" href="vendor/leaflet.css">
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --text:#1d2330; --muted:#6a7385; --line:#e2e5eb;
+    --accent:#d9381e; --accent-d:#b82c16; --ok:#1f8f4e; --warn:#b7791f; --err:#c0392b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#14171c; --panel:#1c2027; --text:#e8ebf1; --muted:#9aa3b5; --line:#2b313b; --accent:#ff5a3c; --accent-d:#e04426; --ok:#4cc982; --warn:#e0b050; --err:#ff7b6b; }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex}
+  aside{width:360px;min-width:360px;height:100%;overflow-y:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px 16px 24px}
+  #map{flex:1;height:100%}
+  h1{font-size:17px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+  fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 12px 12px}
+  legend{padding:0 6px;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}
+  input[type=text],input[type=number],select{width:100%;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}
+  .row{display:flex;gap:8px;align-items:center}
+  .row>*{flex:1}
+  .check{display:flex;align-items:center;gap:6px;margin:8px 0 0;color:var(--text);font-size:13px}
+  .check input{margin:0}
+  button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--muted)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover:not(:disabled){background:var(--accent-d)}
+  .btns{display:flex;gap:8px;margin-top:10px}
+  .btns button{flex:1}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;border:1px solid var(--line)}
+  .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--err);border-color:var(--err)} .pill.warn{color:var(--warn);border-color:var(--warn)}
+  .bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0 4px}
+  .bar>div{height:100%;width:0;background:var(--accent)}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:12px;color:var(--muted)}
+  .stats b{color:var(--text);font-weight:600}
+  #log{height:130px;overflow-y:auto;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+  #log .e{color:var(--err)} #log .w{color:var(--warn)}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .courier{width:20px;height:20px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 0 0 2px var(--accent),0 2px 6px rgba(0,0,0,.4)}
+  .pin{font:700 12px/22px sans-serif;color:#fff;width:24px;height:24px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);text-align:center;border:2px solid #fff;box-shadow:0 2px 5px rgba(0,0,0,.4)}
+  .pin span{display:block;transform:rotate(45deg)}
+  .pin.a{background:#1f8f4e} .pin.b{background:#2457d6}
+  @media (max-width:800px){ body{flex-direction:column-reverse} aside{width:100%;min-width:0;height:50%} #map{height:50%} }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Courier GPS Simulator</h1>
+  <div class="sub">Moves your Android phone's or iPhone's GPS from point A to point B along real roads.</div>
+
+  <fieldset>
+    <legend>1. Phone</legend>
+    <div class="row">
+      <select id="device"></select>
+      <button id="btnRefresh" style="flex:0 0 auto">Refresh</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span id="devStatus" class="pill warn">checking…</span>
+      <button id="btnSetup">Setup phone</button>
+    </div>
+    <label class="check"><input type="checkbox" id="dryRun"> Dry run (no phone, only animate on map)</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Route</legend>
+    <label>Click on map sets:</label>
+    <div class="row">
+      <label class="check" style="margin:0"><input type="radio" name="pick" value="a" checked> Start (A)</label>
+      <label class="check" style="margin:0"><input type="radio" name="pick" value="b"> End (B)</label>
+    </div>
+    <label for="aIn">Start A — lat, long</label>
+    <input type="text" id="aIn" placeholder="41.2995, 69.2401">
+    <label for="bIn">End B — lat, long</label>
+    <input type="text" id="bIn" placeholder="41.3111, 69.2797">
+    <div class="row" style="margin-top:8px">
+      <button id="btnSwap">Swap A ⇄ B</button>
+      <button id="btnClear">Clear</button>
+    </div>
+    <label for="mode">Path type</label>
+    <select id="mode">
+      <option value="road">Real roads (OSRM, free)</option>
+      <option value="line">Straight line</option>
+    </select>
+    <div id="routeInfo" class="hint">Click the map to set A, then B.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>3. Movement</legend>
+    <label for="speed">Courier speed: <b id="speedVal">30</b> km/h</label>
+    <input type="range" id="speed" min="2" max="120" value="30" style="width:100%">
+    <div class="row">
+      <div>
+        <label for="interval">Update every (sec)</label>
+        <input type="number" id="interval" min="0.5" max="10" step="0.5" value="1">
+      </div>
+      <div>
+        <label for="noise">GPS jitter (m)</label>
+        <input type="number" id="noise" min="0" max="50" step="1" value="0">
+      </div>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="stats">
+      <span>Progress: <b id="stPct">0%</b></span><span>Updates sent: <b id="stSent">0</b></span>
+      <span>Distance: <b id="stDist">–</b></span><span>ETA: <b id="stEta">–</b></span>
+      <span style="grid-column:1/3">Now at: <b id="stPos">–</b></span>
+    </div>
+    <div class="btns">
+      <button id="btnStart" class="primary" disabled>▶ Start</button>
+      <button id="btnPause" disabled>⏸ Pause</button>
+      <button id="btnStop" disabled>■ Stop</button>
+    </div>
+    <div class="btns">
+      <button id="btnTeleport" disabled>Put phone at A</button>
+      <button id="btnRelease">Release GPS</button>
+    </div>
+    <div class="hint">“Release GPS” stops mock updates so the phone returns to its real location.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Log</legend>
+    <div id="log"></div>
+  </fieldset>
+  <div class="hint">Map © OpenStreetMap contributors. Routing: OSRM public demo server (light QA use only).</div>
+</aside>
+<div id="map"></div>
+
+<script src="vendor/leaflet.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const OSRM = 'https://router.project-osrm.org';
+  const R = 6371000;
+
+  // ---------- geo helpers ----------
+  const rad = (d) => d * Math.PI / 180, deg = (r) => r * 180 / Math.PI;
+  function dist(a, b) {
+    const dLat = rad(b[0] - a[0]), dLng = rad(b[1] - a[1]);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+  function bearing(a, b) {
+    const y = Math.sin(rad(b[1] - a[1])) * Math.cos(rad(b[0]));
+    const x = Math.cos(rad(a[0])) * Math.sin(rad(b[0])) - Math.sin(rad(a[0])) * Math.cos(rad(b[0])) * Math.cos(rad(b[1] - a[1]));
+    return (deg(Math.atan2(y, x)) + 360) % 360;
+  }
+  const fmtCoord = (p) => p ? `${p[0].toFixed(6)}, ${p[1].toFixed(6)}` : '';
+  const fmtDist = (m) => m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m';
+  const fmtTime = (s) => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m}m ${s % 60}s` : `${s}s`; };
+  function parseCoord(str) {
+    const m = String(str).match(/(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)/);
+    if (!m) return null;
+    const lat = +m[1], lng = +m[2];
+    return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? [lat, lng] : null;
+  }
+
+  // ---------- state ----------
+  const state = {
+    a: null, b: null, path: [], cum: [], total: 0,
+    pos: 0, running: false, timer: null, lastTs: 0, sent: 0, sending: false, sessionStarted: false,
+  };
+
+  // ---------- map ----------
+  const map = L.map('map').setView([41.2995, 69.2401], 13); // Tashkent
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+  }).addTo(map);
+  const pinIcon = (cls, t) => L.divIcon({ className: '', html: `<div class="pin ${cls}"><span>${t}</span></div>`, iconSize: [24, 24], iconAnchor: [12, 24] });
+  let mA = null, mB = null, routeLine = null;
+  const courier = L.marker([0, 0], { icon: L.divIcon({ className: '', html: '<div class="courier"></div>', iconSize: [20, 20], iconAnchor: [10, 10] }), zIndexOffset: 1000 });
+
+  function log(msg, cls) {
+    const el = $('log'); const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    el.appendChild(d); el.scrollTop = el.scrollHeight;
+    while (el.childElementCount > 300) el.removeChild(el.firstChild);
+  }
+
+  function setPoint(which, latlng, fromInput) {
+    if (state.running) return log('Stop the simulation before changing points.', 'w');
+    state[which] = latlng;
+    const isA = which === 'a';
+    let m = isA ? mA : mB;
+    if (!m) {
+      m = L.marker(latlng, { draggable: true, icon: pinIcon(isA ? 'a' : 'b', isA ? 'A' : 'B') }).addTo(map);
+      m.on('dragend', () => { const p = m.getLatLng(); setPoint(which, [p.lat, p.lng]); });
+      if (isA) mA = m; else mB = m;
+    } else m.setLatLng(latlng);
+    if (!fromInput) $(isA ? 'aIn' : 'bIn').value = fmtCoord(latlng);
+    buildRoute();
+  }
+
+  map.on('click', (e) => {
+    const pick = document.querySelector('input[name=pick]:checked').value;
+    setPoint(pick, [e.latlng.lat, e.latlng.lng]);
+    if (pick === 'a' && !state.b) document.querySelector('input[name=pick][value=b]').checked = true;
+  });
+  $('aIn').addEventListener('change', () => { const p = parseCoord($('aIn').value); if (p) { setPoint('a', p, true); map.panTo(p); } else log('Invalid A coordinates', 'e'); });
+  $('bIn').addEventListener('change', () => { const p = parseCoord($('bIn').value); if (p) { setPoint('b', p, true); map.panTo(p); } else log('Invalid B coordinates', 'e'); });
+  $('btnSwap').onclick = () => {
+    if (state.running) return;
+    const a = state.a, b = state.b;
+    if (a) setPoint('b', a); else if (mB) { map.removeLayer(mB); mB = null; state.b = null; $('bIn').value = ''; }
+    if (b) setPoint('a', b); else if (mA) { map.removeLayer(mA); mA = null; state.a = null; $('aIn').value = ''; }
+  };
+  $('btnClear').onclick = () => { stop(); [mA, mB, routeLine].forEach((l) => l && map.removeLayer(l)); mA = mB = routeLine = null; state.a = state.b = null; state.path = []; $('aIn').value = $('bIn').value = ''; courier.remove(); updateUi(); $('routeInfo').textContent = 'Click the map to set A, then B.'; };
+
+  // ---------- routing ----------
+  let routeToken = 0;
+  async function buildRoute() {
+    if (!state.a || !state.b) { updateUi(); return; }
+    const token = ++routeToken;
+    let path = null, how = 'straight line';
+    if ($('mode').value === 'road') {
+      $('routeInfo').textContent = 'Requesting road route…';
+      try {
+        const [a, b] = [state.a, state.b];
+        const url = `${OSRM}/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?overview=full&geometries=geojson`;
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.code === 'Ok' && j.routes && j.routes[0]) {
+          path = j.routes[0].geometry.coordinates.map((c) => [c[1], c[0]]);
+          how = 'road route';
+        } else log('OSRM: ' + (j.message || j.code) + ' — using straight line', 'w');
+      } catch (e) { log('OSRM unreachable (' + e.message + ') — using straight line', 'w'); }
+    }
+    if (token !== routeToken) return;
+    if (!path) path = [state.a, state.b];
+    state.path = path;
+    state.cum = [0];
+    for (let i = 1; i < path.length; i++) state.cum.push(state.cum[i - 1] + dist(path[i - 1], path[i]));
+    state.total = state.cum[state.cum.length - 1];
+    state.pos = 0;
+    if (routeLine) map.removeLayer(routeLine);
+    routeLine = L.polyline(path, { color: '#2457d6', weight: 5, opacity: .8 }).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [50, 50] });
+    $('routeInfo').textContent = `${how}: ${fmtDist(state.total)} · ${path.length} points`;
+    updateUi();
+  }
+  $('mode').onchange = () => { if (!state.running) buildRoute(); };
+
+  // ---------- movement ----------
+  function pointAt(d) {
+    const { path, cum } = state;
+    if (d <= 0) return { p: path[0], brg: bearing(path[0], path[1] || path[0]) };
+    if (d >= state.total) { const n = path.length; return { p: path[n - 1], brg: bearing(path[Math.max(0, n - 2)], path[n - 1]) }; }
+    let i = 1; while (cum[i] < d) i++;
+    const seg = cum[i] - cum[i - 1], t = seg ? (d - cum[i - 1]) / seg : 0;
+    const a = path[i - 1], b = path[i];
+    return { p: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], brg: bearing(a, b) };
+  }
+  function jitter(p, m) {
+    if (!m) return p;
+    const r = Math.random() * m, th = Math.random() * 2 * Math.PI;
+    return [p[0] + deg(r * Math.cos(th) / R), p[1] + deg(r * Math.sin(th) / (R * Math.cos(rad(p[0]))))];
+  }
+  const serial = () => $('device').value || '';
+  async function api(path, body) {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return r.json();
+  }
+  async function pushLocation(p, speedMs, brg) {
+    state.sent++;
+    $('stSent').textContent = state.sent;
+    if ($('dryRun').checked) return true;
+    const res = await api('/api/location', { serial: serial(), lat: p[0], lng: p[1], speed: speedMs, bearing: brg, accuracy: 5 });
+    if (!res.ok) { log('Device error: ' + (res.error || 'unknown'), 'e'); return false; }
+    return true;
+  }
+
+  async function tick() {
+    if (!state.running) return;
+    const now = performance.now();
+    const dt = (now - state.lastTs) / 1000; state.lastTs = now;
+    const speedMs = +$('speed').value / 3.6;
+    state.pos = Math.min(state.total, state.pos + speedMs * dt);
+    const { p, brg } = pointAt(state.pos);
+    courier.setLatLng(p); if (!map.hasLayer(courier)) courier.addTo(map);
+    if (!map.getBounds().contains(p)) map.panTo(p);
+    const finished = state.pos >= state.total;
+    const ok = await pushLocation(jitter(p, +$('noise').value), finished ? 0.1 : speedMs, brg);
+    updateUi();
+    if (!ok && !$('dryRun').checked) { pause(); log('Paused because the phone rejected the update.', 'e'); return; }
+    if (finished) { log('Arrived at B.'); stop(true); return; }
+    state.timer = setTimeout(tick, Math.max(200, (+$('interval').value || 1) * 1000));
+  }
+
+  function start() {
+    if (state.path.length < 2) return;
+    if (!$('dryRun').checked && !serial()) return log('No phone selected. Connect via USB or tick Dry run.', 'e');
+    if (state.pos >= state.total) state.pos = 0;
+    state.running = true; state.lastTs = performance.now();
+    if (state.pos === 0) { state.sent = 0; log(`Start: ${fmtDist(state.total)} at ${$('speed').value} km/h`); }
+    updateUi(); tick();
+  }
+  function pause() { state.running = false; clearTimeout(state.timer); updateUi(); }
+  function stop(arrived) {
+    state.running = false; clearTimeout(state.timer);
+    if (!arrived) { state.pos = 0; if (state.path.length) courier.remove(); }
+    updateUi();
+  }
+  $('btnStart').onclick = start;
+  $('btnPause').onclick = () => { pause(); log('Paused (phone keeps reporting the last position).'); };
+  $('btnStop').onclick = () => { stop(); log('Stopped and reset to A.'); };
+  $('btnTeleport').onclick = async () => {
+    if (!state.a) return;
+    const ok = await pushLocation(state.a, 0, 0);
+    if (ok) { log('Phone placed at A: ' + fmtCoord(state.a)); courier.setLatLng(state.a).addTo(map); }
+  };
+  $('btnRelease').onclick = async () => {
+    if ($('dryRun').checked) return log('Dry run: nothing to release.');
+    const r = await api('/api/stop', { serial: serial() });
+    log(r.ok ? 'Mock GPS released — phone uses its real location again.' : 'Release failed: ' + r.error, r.ok ? '' : 'e');
+  };
+  $('speed').oninput = () => { $('speedVal').textContent = $('speed').value; updateUi(); };
+  $('interval').onchange = updateUi;
+
+  function updateUi() {
+    const ready = state.path.length >= 2;
+    $('btnStart').disabled = !ready || state.running;
+    $('btnPause').disabled = !state.running;
+    $('btnStop').disabled = !ready || (!state.running && state.pos === 0);
+    $('btnTeleport').disabled = !state.a || state.running;
+    const pct = state.total ? state.pos / state.total * 100 : 0;
+    $('prog').style.width = pct + '%'; $('stPct').textContent = pct.toFixed(0) + '%';
+    $('stDist').textContent = ready ? `${fmtDist(state.pos)} / ${fmtDist(state.total)}` : '–';
+    $('stEta').textContent = ready ? fmtTime((state.total - state.pos) / (+$('speed').value / 3.6)) : '–';
+    const cur = ready ? pointAt(state.pos).p : null;
+    $('stPos').textContent = cur ? fmtCoord(cur) : '–';
+  }
+
+  // ---------- device ----------
+  async function refreshDevices() {
+    const st = $('devStatus'), sel = $('device');
+    st.className = 'pill warn'; st.textContent = 'checking…';
+    try {
+      const r = await fetch('/api/status' + (sel.value ? '?serial=' + encodeURIComponent(sel.value) : ''));
+      const j = await r.json();
+      const iosOk = j.ios && j.ios.installed;
+      if (!j.adbFound && !iosOk) { st.className = 'pill bad'; st.textContent = 'adb not found'; sel.innerHTML = ''; log('adb not found: ' + (j.error || '') + ' (iPhone: pymobiledevice3 not found either)', 'e'); return; }
+      const prev = sel.value;
+      sel.innerHTML = '';
+      const val = (d) => `${d.platform}:${d.serial}`;
+      const ready = j.devices.filter((d) => d.state === 'device');
+      j.devices.forEach((d) => {
+        const o = document.createElement('option');
+        o.value = d.state === 'device' ? val(d) : '';
+        o.textContent = `${d.platform === 'ios' ? '🍎 ' : ''}${d.model || d.serial} (${d.state})`;
+        if (d.state !== 'device') o.disabled = true;
+        sel.appendChild(o);
+      });
+      if (prev && ready.some((d) => val(d) === prev)) sel.value = prev;
+      if (!ready.length) {
+        st.className = 'pill bad';
+        st.textContent = j.devices.length ? 'phone unauthorized' : 'no phone';
+        return;
+      }
+      if (!sel.value) sel.value = val(ready[0]);
+      const isIos = sel.value.startsWith('ios:');
+      const j2 = await (await fetch('/api/status?serial=' + encodeURIComponent(sel.value))).json();
+      if (j2.helperInstalled) { st.className = 'pill ok'; st.textContent = isIos ? 'iPhone ready' : 'phone ready'; }
+      else { st.className = 'pill warn'; st.textContent = 'needs setup'; }
+    } catch (e) { st.className = 'pill bad'; st.textContent = 'server error'; log(e.message, 'e'); }
+  }
+  $('btnRefresh').onclick = refreshDevices;
+  $('device').onchange = refreshDevices;
+  $('btnSetup').onclick = async () => {
+    if (!serial()) return log('No phone selected.', 'e');
+    log('Setting up phone…');
+    const r = await api('/api/setup', { serial: serial() });
+    (r.log || []).forEach((l) => log(l));
+    if (r.ok) log('Phone setup complete.'); else log('Setup failed: ' + (r.error || ''), 'e');
+    refreshDevices();
+  };
+
+  refreshDevices();
+  updateUi();
+  window.__sim = { state, setPoint }; // handy for debugging in DevTools
+})();
+</script>
+</body>
+</html>

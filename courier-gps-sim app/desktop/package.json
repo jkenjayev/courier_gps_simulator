@@ -1,0 +1,83 @@
+{
+  "name": "courier-gps-simulator",
+  "productName": "Courier GPS Simulator",
+  "version": "1.0.0",
+  "description": "Desktop app: moves a real Android phone's or iPhone's GPS from point A to B along real roads, for testing courier tracking.",
+  "author": "Bellissimo Pizza QA",
+  "license": "MIT",
+  "private": true,
+  "main": "main.js",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "start": "node scripts/prepare.js && node scripts/fetch-tools.js && electron .",
+    "prepare-app": "node scripts/prepare.js",
+    "tools": "node scripts/fetch-tools.js",
+    "ios-helper": "bash scripts/build-ios-helper.sh",
+    "dist": "node scripts/dist.js",
+    "dist:no-ios": "node scripts/dist.js --skip-ios"
+  },
+  "devDependencies": {
+    "adm-zip": "^0.6.1",
+    "electron": "^45.3.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "uz.bellissimo.courier-gps-simulator",
+    "productName": "Courier GPS Simulator",
+    "copyright": "Bellissimo Pizza QA",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "tools.js",
+      "package.json",
+      "app/**/*"
+    ],
+    "asarUnpack": [
+      "app/ios_helper.py"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/${os}",
+        "to": "tools",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ],
+      "identity": null
+    },
+    "dmg": {
+      "title": "Courier GPS Simulator"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "maintainer": "Bellissimo Pizza QA",
+      "syncDesktopName": true
+    },
+    "publish": null
+  },
+  "desktopName": "courier-gps-simulator.desktop"
+}

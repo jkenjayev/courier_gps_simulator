@@ -1,0 +1,15 @@
+{
+  "name": "courier-gps-sim",
+  "version": "1.0.0",
+  "description": "Move a real Android phone's GPS from point A to B along real roads, for testing courier tracking.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "bash setup.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "private": true
+}
