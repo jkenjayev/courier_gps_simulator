@@ -3,7 +3,6 @@
   "productName": "Courier GPS Simulator",
   "version": "1.0.0",
   "description": "Desktop app: moves a real Android phone's or iPhone's GPS from point A to B along real roads, for testing courier tracking.",
-  "author": "Bellissimo Pizza QA",
   "license": "MIT",
   "private": true,
   "main": "main.js",
@@ -24,9 +23,8 @@
     "electron-builder": "^26.18.0"
   },
   "build": {
-    "appId": "uz.bellissimo.courier-gps-simulator",
+    "appId": "courier-gps-simulator",
     "productName": "Courier GPS Simulator",
-    "copyright": "Bellissimo Pizza QA",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -74,7 +72,6 @@
         "AppImage"
       ],
       "category": "Development",
-      "maintainer": "Bellissimo Pizza QA",
       "syncDesktopName": true
     },
     "publish": null
