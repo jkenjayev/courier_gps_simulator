@@ -470,7 +470,7 @@ Android phone checklist (once per phone; cannot be done by a script):
    1. Settings > About phone > tap "Build number" 7 times.
    2. Developer options > turn on "USB debugging" (Xiaomi/Redmi/Poco: also "USB debugging (Security settings)").
    3. Plug in the USB cable and tap Allow on the phone.
-   4. Run  bash setup.sh  again so the script installs Appium Settings on the phone
+   4. Run  bash start.sh  again so the script installs Appium Settings on the phone
       (or click "Setup phone" once in the page).
 EOF
 fi
@@ -480,14 +480,14 @@ cat <<'EOF'
 iPhone checklist (once per phone, iOS 17 or newer; cannot be done by a script):
    1. Settings > Privacy & Security > Developer Mode > on, then restart the iPhone.
    2. Plug in the iPhone, unlock it, tap "Trust This Computer".
-   3. Run  bash setup.sh  again so the script mounts the developer image.
+   3. Run  bash start.sh  again so the script mounts the developer image.
    Usually no tunnel or sudo is needed: the simulator tries to open its own. If an iPhone will not connect,
    start a root tunnel as a fallback, in another tab:  sudo pymobiledevice3 remote tunneld
 EOF
 fi
 
 if [ ${#FAILS[@]} -gt 0 ]; then
-  printf '\nFix the items above, then run  bash setup.sh  again.\n'
+  printf '\nFix the items above, then run  bash start.sh  again.\n'
   exit 1
 fi
 
@@ -506,5 +506,7 @@ if [ "$LAUNCH" = 1 ]; then
     exit 0
   fi
 fi
-printf '\n%sStart the simulator:%s  node server.js   then open http://localhost:%s\n' "$B" "$N" "$PORT"
+if [ -z "${SETUP_FROM_START:-}" ]; then   # start.sh starts the simulator itself
+  printf '\n%sStart the simulator:%s  bash start.sh   (or: node server.js and open http://localhost:%s)\n' "$B" "$N" "$PORT"
+fi
 exit 0

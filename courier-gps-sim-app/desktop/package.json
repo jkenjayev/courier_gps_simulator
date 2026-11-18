@@ -1,8 +1,9 @@
 {
   "name": "courier-gps-simulator",
   "productName": "Courier GPS Simulator",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Desktop app: moves a real Android phone's or iPhone's GPS from point A to B along real roads, for testing courier tracking.",
+  "author": "Courier GPS Simulator contributors",
   "license": "MIT",
   "private": true,
   "main": "main.js",
@@ -23,8 +24,9 @@
     "electron-builder": "^26.18.0"
   },
   "build": {
-    "appId": "courier-gps-simulator",
+    "appId": "app.courier-gps-simulator",
     "productName": "Courier GPS Simulator",
+    "copyright": "Courier GPS Simulator contributors",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -72,6 +74,7 @@
         "AppImage"
       ],
       "category": "Development",
+      "maintainer": "Courier GPS Simulator contributors",
       "syncDesktopName": true
     },
     "publish": null

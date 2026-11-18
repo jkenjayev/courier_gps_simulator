@@ -12,10 +12,18 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
+const crypto = require('crypto');
+const { execFile, spawn, fork } = require('child_process');
 
 const PORT = Number(process.env.PORT || 3000);
+// Saved routes and places live in one small JSON file, shared by the browser version and the desktop app.
+const DATA_DIR = process.env.DATA_DIR || path.join(os.homedir(), '.courier-gps-sim');
+const DATA_FILE = path.join(DATA_DIR, 'data.json');
+// Address search uses the free Nominatim service of OpenStreetMap (light use only, max 1 request per second).
+const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
+const GEO_UA = 'CourierGPSSimulator/1.0 (QA tool; https://github.com/jkenjayev/courier_gps_simulator)';
 const ADB = process.env.ADB_PATH || 'adb';
 const PKG = 'io.appium.settings';
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -200,10 +208,71 @@ async function iosCall(udid, msg) {
 function closeAllIosHelpers() {
   for (const h of iosHelpers.values()) { try { h.proc.kill(); } catch (_) {} }
 }
+
+/* ------------------------------------------------------------------ */
+/* Stop faking GPS when the simulator goes away                         */
+/* ------------------------------------------------------------------ */
+// The Android mock service lives on the phone and keeps going by itself, so we remember which phones we are
+// faking and (1) release them on a normal quit, (2) let a tiny watchdog process do it if we are killed.
+// The iPhone needs nothing extra: its location is released as soon as its helper process (our child) ends.
+const androidActive = new Set();
+let watchdog = null;
+
+function getWatchdog() {
+  if (watchdog && watchdog.connected) return watchdog;
+  try {
+    const wd = fork(path.join(__dirname, 'watchdog.js'), [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    wd.on('error', () => { if (watchdog === wd) watchdog = null; });
+    wd.on('exit', () => { if (watchdog === wd) watchdog = null; });
+    wd.unref();
+    if (wd.channel && wd.channel.unref) wd.channel.unref();
+    watchdog = wd;
+    for (const s of androidActive) { try { wd.send({ type: 'track', adb: ADB, serial: s }); } catch (_) {} }
+  } catch (_) { watchdog = null; }   // best effort: the normal release on quit still works
+  return watchdog;
+}
+function watchdogSend(msg) {
+  try { const wd = getWatchdog(); if (wd && wd.connected) wd.send(msg); } catch (_) { /* ignore */ }
+}
+function trackAndroid(serial) {
+  if (androidActive.has(serial)) return;
+  androidActive.add(serial);
+  watchdogSend({ type: 'track', adb: ADB, serial });
+}
+function untrackAndroid(serial) {
+  androidActive.delete(serial);
+  if (watchdog && watchdog.connected) { try { watchdog.send({ type: 'untrack', serial }); } catch (_) {} }
+}
+
+/** Give every phone we are faking its real location back. Used on quit; safe to call twice. */
+async function releaseAll() {
+  const jobs = [];
+  for (const serial of [...androidActive]) {
+    untrackAndroid(serial);
+    jobs.push(adb(withSerial(serial, ['shell', 'am', 'stopservice', `${PKG}/.LocationService`]), 4000));
+  }
+  for (const [udid, h] of [...iosHelpers]) {
+    jobs.push(
+      withTimeout(iosCall(udid, { cmd: 'clear' }), 3000, 'timeout').catch(() => {}).then(() => {
+        iosHelpers.delete(udid);
+        try { h.proc.stdin.write(JSON.stringify({ cmd: 'quit' }) + '\n'); } catch (_) {}
+        try { h.proc.kill(); } catch (_) {}
+      })
+    );
+  }
+  await Promise.all(jobs.map((p) => Promise.resolve(p).catch(() => {})));
+}
+
 process.on('exit', closeAllIosHelpers);
-if (require.main === module) {   // only when run as `node server.js` (the desktop app handles its own signals)
-  process.on('SIGINT', () => { closeAllIosHelpers(); process.exit(0); });
-  process.on('SIGTERM', () => { closeAllIosHelpers(); process.exit(0); });
+if (require.main === module) {   // only when run as `node server.js` (the desktop app handles its own quit)
+  let leaving = false;
+  const leave = () => {
+    if (leaving) return;
+    leaving = true;
+    const t = setTimeout(() => process.exit(0), 6000);
+    releaseAll().finally(() => { clearTimeout(t); process.exit(0); });
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, leave);
 }
 
 /* ------------------------------------------------------------------ */
@@ -243,6 +312,7 @@ async function handleStatus(url) {
     d.helperInstalled = ios.devices.some((x) => x.serial === target.id);
   }
   d.apkBundled = fs.existsSync(APK_PATH);
+  d.api = 2;   // 2 = has saved routes/places and address search; the page warns when it talks to an older server
   return d;
 }
 
@@ -317,6 +387,7 @@ async function handleLocation(body) {
   if (accuracy !== null) args.push('--es', 'accuracy', String(accuracy));
   const r = await adb(withSerial(serial, args));
   const failed = !r.ok || /error|exception|not found/i.test(r.stdout + r.stderr);
+  if (!failed) trackAndroid(serial);
   return failed ? { ok: false, error: r.stderr || r.stdout } : { ok: true };
 }
 
@@ -330,7 +401,174 @@ async function handleStop(body) {
   }
   const serial = target.id;
   const r = await adb(withSerial(serial, ['shell', 'am', 'stopservice', `${PKG}/.LocationService`]));
+  if (r.ok) untrackAndroid(serial);
   return { ok: r.ok, error: r.ok ? undefined : r.stderr };
+}
+
+/* ------------------------------------------------------------------ */
+/* Saved routes and places (one JSON file)                              */
+/* ------------------------------------------------------------------ */
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_SAVED = 500;
+
+function numStrict(v, min, max) {
+  if (typeof v === 'string' ? v.trim() === '' : typeof v !== 'number') return null;
+  return num(v, min, max);
+}
+function cleanTitle(t) { return String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, 80); }
+function cleanPoint(p) {
+  if (!Array.isArray(p) || p.length !== 2) return null;
+  const lat = numStrict(p[0], -90, 90), lng = numStrict(p[1], -180, 180);
+  return lat === null || lng === null ? null : [lat, lng];
+}
+function cleanId(id) { return typeof id === 'string' && ID_RE.test(id) ? id : crypto.randomUUID(); }
+function cleanCreated(c) { const n = Number(c); return Number.isFinite(n) && n > 0 ? n : Date.now(); }
+
+function cleanPlace(x) {
+  if (!x || typeof x !== 'object') return null;
+  const title = cleanTitle(x.title);
+  const p = cleanPoint([x.lat, x.lng]);
+  if (!title || !p) return null;
+  return { id: cleanId(x.id), title, lat: p[0], lng: p[1], created: cleanCreated(x.created) };
+}
+
+function cleanRoute(x) {
+  if (!x || typeof x !== 'object') return null;
+  const title = cleanTitle(x.title);
+  const a = cleanPoint(x.a), b = cleanPoint(x.b);
+  if (!title || !a || !b) return null;
+  const rt = x.roundTrip && typeof x.roundTrip === 'object' ? x.roundTrip : {};
+  const trips = numStrict(rt.trips, 0, 9999);
+  const wait = numStrict(rt.wait, 0, 600);
+  const speed = numStrict(x.speed, 2, 120);
+  const interval = numStrict(x.interval, 0.5, 10);
+  const jitter = numStrict(x.jitter, 0, 50);
+  const dist = numStrict(x.distanceM, 0, 1e7);
+  return {
+    id: cleanId(x.id), title, a, b,
+    pathType: x.pathType === 'line' ? 'line' : 'road',
+    speed: speed === null ? 30 : speed,
+    interval: interval === null ? 1 : interval,
+    jitter: jitter === null ? 0 : jitter,
+    roundTrip: { on: rt.on === true, trips: trips === null ? 1 : Math.floor(trips), wait: wait === null ? 0 : wait },
+    distanceM: dist === null ? 0 : dist,
+    created: cleanCreated(x.created),
+  };
+}
+
+function readData() {
+  let text;
+  try { text = fs.readFileSync(DATA_FILE, 'utf8'); } catch (_) { return { places: [], routes: [] }; }   // no file yet
+  try {
+    const j = JSON.parse(text);
+    return {
+      places: (Array.isArray(j.places) ? j.places : []).map(cleanPlace).filter(Boolean).slice(0, MAX_SAVED),
+      routes: (Array.isArray(j.routes) ? j.routes : []).map(cleanRoute).filter(Boolean).slice(0, MAX_SAVED),
+    };
+  } catch (_) {
+    // Unreadable file: keep a copy so nothing is lost, then start from an empty list.
+    try { fs.copyFileSync(DATA_FILE, `${DATA_FILE}.corrupt-${Date.now()}`); } catch (__) { /* ignore */ }
+    return { places: [], routes: [] };
+  }
+}
+
+function writeData(d) {
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${DATA_FILE}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, places: d.places, routes: d.routes }, null, 2));
+  fs.renameSync(tmp, DATA_FILE);   // atomic: a crash never leaves a half-written file
+}
+
+function dataReply(d, extra) { return { ok: true, places: d.places, routes: d.routes, dataFile: DATA_FILE, ...extra }; }
+
+function handleDataGet() { return dataReply(readData()); }
+
+function handleDataSave(body) {
+  const kind = body.kind;
+  if (kind !== 'place' && kind !== 'route') return { ok: false, error: 'unknown kind' };
+  const item = kind === 'place' ? cleanPlace(body.item) : cleanRoute(body.item);
+  if (!item) return { ok: false, error: `invalid ${kind}: a title and valid coordinates are required` };
+  const d = readData();
+  const list = kind === 'place' ? d.places : d.routes;
+  const i = list.findIndex((x) => x.id === item.id);
+  if (i >= 0) list[i] = { ...item, created: list[i].created };
+  else if (list.length >= MAX_SAVED) return { ok: false, error: `too many saved ${kind}s (max ${MAX_SAVED}), delete some first` };
+  else list.push(item);
+  try { writeData(d); } catch (e) { return { ok: false, error: `could not write ${DATA_FILE}: ${e.message}` }; }
+  return dataReply(d, { id: item.id });
+}
+
+function handleDataDelete(body) {
+  const kind = body.kind;
+  if (kind !== 'place' && kind !== 'route') return { ok: false, error: 'unknown kind' };
+  if (typeof body.id !== 'string' || !ID_RE.test(body.id)) return { ok: false, error: 'invalid id' };
+  const d = readData();
+  if (kind === 'place') d.places = d.places.filter((x) => x.id !== body.id);
+  else d.routes = d.routes.filter((x) => x.id !== body.id);
+  try { writeData(d); } catch (e) { return { ok: false, error: `could not write ${DATA_FILE}: ${e.message}` }; }
+  return dataReply(d);
+}
+
+/* ------------------------------------------------------------------ */
+/* Address search (Nominatim). Only on an explicit search, never while typing; 1 request/second. */
+/* ------------------------------------------------------------------ */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const geoCache = new Map();   // key -> { t, results }
+let geoChain = Promise.resolve();
+let geoLast = 0;
+let geoQueued = 0;
+
+function geoViewbox(s) {
+  const p = String(s || '').split(',').map((v) => Number(v));
+  if (p.length !== 4 || p.some((v) => !Number.isFinite(v))) return '';
+  const [l, t, r, b] = p;
+  return Math.abs(l) <= 180 && Math.abs(r) <= 180 && Math.abs(t) <= 90 && Math.abs(b) <= 90 ? p.map((v) => v.toFixed(5)).join(',') : '';
+}
+
+async function handleGeocode(url) {
+  const q = String(url.searchParams.get('q') || '').replace(/\s+/g, ' ').trim();
+  if (q.length < 3) return { ok: false, error: 'Type at least 3 characters.' };
+  if (q.length > 200) return { ok: false, error: 'Search text is too long.' };
+  const lang = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : '';
+  const viewbox = geoViewbox(url.searchParams.get('viewbox'));
+  const key = [q.toLowerCase(), lang, viewbox].join('|');
+  const hit = geoCache.get(key);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return { ok: true, results: hit.results, cached: true };
+  if (geoQueued >= 3) return { ok: false, error: 'Too many searches at once, wait a moment.' };
+
+  geoQueued++;
+  const job = geoChain.then(async () => {
+    const wait = geoLast + 1100 - Date.now();   // Nominatim usage policy: at most 1 request per second
+    if (wait > 0) await sleep(wait);
+    geoLast = Date.now();
+    const u = new URL(NOMINATIM_URL);
+    u.searchParams.set('format', 'jsonv2');
+    u.searchParams.set('q', q);
+    u.searchParams.set('limit', '6');
+    if (lang) u.searchParams.set('accept-language', lang);
+    if (viewbox) u.searchParams.set('viewbox', viewbox);   // prefers results inside the visible map, does not exclude others
+    const r = await fetch(u, { headers: { 'User-Agent': GEO_UA, Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) {
+      return { ok: false, error: r.status === 429 || r.status === 403
+        ? 'The free search service is busy or limiting requests. Wait a minute and try again.'
+        : `Search service error (${r.status}).` };
+    }
+    const j = await r.json();
+    const results = (Array.isArray(j) ? j : []).slice(0, 6)
+      .map((x) => ({ name: String(x.display_name || '').slice(0, 200), lat: Number(x.lat), lng: Number(x.lon), type: String(x.type || '').slice(0, 40) }))
+      .filter((x) => x.name && Number.isFinite(x.lat) && Number.isFinite(x.lng) && Math.abs(x.lat) <= 90 && Math.abs(x.lng) <= 180);
+    if (geoCache.size > 100) geoCache.delete(geoCache.keys().next().value);
+    geoCache.set(key, { t: Date.now(), results });
+    return { ok: true, results };
+  });
+  geoChain = job.catch(() => {});
+  try {
+    return await job;
+  } catch (e) {
+    return { ok: false, error: e && e.name === 'TimeoutError' ? 'The search service did not answer in time.' : 'Search failed: ' + String((e && e.message) || e) };
+  } finally {
+    geoQueued--;
+  }
 }
 
 function readJson(req) {
@@ -363,6 +601,8 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname.startsWith('/api/')) {
       if (req.method === 'GET' && url.pathname === '/api/status') return send(res, 200, await handleStatus(url));
+      if (req.method === 'GET' && url.pathname === '/api/data') return send(res, 200, handleDataGet());
+      if (req.method === 'GET' && url.pathname === '/api/geocode') return send(res, 200, await handleGeocode(url));
       if (req.method === 'POST') {
         // Require JSON content type: blocks simple cross-site form posts.
         if (!String(req.headers['content-type'] || '').includes('application/json'))
@@ -371,6 +611,8 @@ const server = http.createServer(async (req, res) => {
         if (url.pathname === '/api/location') return send(res, 200, await handleLocation(body));
         if (url.pathname === '/api/setup') return send(res, 200, await handleSetup(body));
         if (url.pathname === '/api/stop') return send(res, 200, await handleStop(body));
+        if (url.pathname === '/api/data/save') return send(res, 200, handleDataSave(body));
+        if (url.pathname === '/api/data/delete') return send(res, 200, handleDataDelete(body));
       }
       return send(res, 404, { error: 'not found' });
     }
@@ -402,12 +644,14 @@ function start(port = PORT) {
   });
 }
 
-function stop() {
+async function stop() {
+  await releaseAll();
   closeAllIosHelpers();
+  if (watchdog && watchdog.connected) { try { watchdog.disconnect(); } catch (_) {} }
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-module.exports = { start, stop, closeAllIosHelpers };
+module.exports = { start, stop, closeAllIosHelpers, releaseAll };
 
 if (require.main === module) {
   start().catch((e) => { console.error('Could not start: ' + e.message); process.exit(1); });

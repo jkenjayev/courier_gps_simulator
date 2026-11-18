@@ -118,7 +118,9 @@ if (!app.requestSingleInstanceLock()) {
     if (!fs.existsSync(serverFile)) return fail('app/server.js is missing. Run "npm run prepare-app" first.');
     try {
       sim = require(serverFile);
-      const { port } = await sim.start(0);   // 0 = any free port
+      // A fixed port keeps the page's own settings (which sections are open) between launches; fall back to any free port.
+      let port;
+      try { ({ port } = await sim.start(47831)); } catch (_) { ({ port } = await sim.start(0)); }
       buildMenu();
       createWindow(port);
     } catch (e) {
@@ -127,5 +129,16 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { if (sim) sim.closeAllIosHelpers(); });
+
+  // Closing the app must stop the fake GPS: give every phone its real location back, then really quit.
+  // (If the app is force-quit or crashes, a small watchdog process started by the server does the same.)
+  let releasing = false;
+  app.on('before-quit', (e) => {
+    if (!sim || releasing) return;
+    releasing = true;
+    e.preventDefault();
+    const quitNow = () => app.quit();
+    const timer = setTimeout(quitNow, 6000);   // never hang on a phone that does not answer
+    sim.releaseAll().catch(() => {}).finally(() => { clearTimeout(timer); sim.closeAllIosHelpers(); quitNow(); });
+  });
 }
